@@ -49,18 +49,39 @@ def make_script():
     summary = story.get("summary", "")
     
     sys = {"role": "system","content": (
-        "You are a scriptwriter for 60-second short-form videos. "
-        "Write a script under 150 words, split into 5-7 scenes with timestamps that total <= 60 seconds. "
-        "Return STRICT JSON with keys: title, full_narration, scenes. "
-        "scenes is an array of {scene_index, start, end, narration, prompt}. "
-        "The prompt must describe the exact image that should appear in that scene. "
-        "Avoid camera jargon; be concrete about subjects, setting, era, lighting, composition."
+        "You are a scriptwriter for short-form videos under 60 seconds. "
+        "Create a script with 5-7 scenes (4-10 seconds each) totaling ≤60s. Rules:\n"
+        "- First scene starts at 0.0\n"
+        "- Each scene lasts 4-10s (adjust based on narration density)\n"
+        "- Total duration MUST NOT exceed 60s\n"
+        "- Natural pacing: Longer scenes for complex ideas, shorter for transitions\n"
+        "- Return JSON with: title, full_narration, scenes (array of {scene_index, start, end, narration, prompt})\n"
+        "Example:\n"
+        "- Scene 1: 0.0 → 8.2s (Introduction)\n"
+        "- Scene 2: 8.2 → 16.5s (Challenge)\n"
+        "- Scene 3: 16.5 → 28.0s (Breakthrough)\n"
+        "- Scene 4: 28.0 → 38.5s (Impact)\n"
+        "- Scene 5: 38.5 → 47.0s (Legacy)"
     )}
     usr = {"role": "user","content": (
-        f"Create a <=60s script about {inventor} and the creation of {invention}. "
-        f"Hook: {hook}. Summary for context: {summary}. "
-        "Ensure scenes cover: origin moment, key challenge, breakthrough, impact. "
-        "Timestamps should be monotonic starting at 0.0."
+        f"Create a compelling script (≤60s) about {inventor} and {invention}. "
+        f"Hook: '{hook}'. Context: {summary}\n\n"
+        "Structure Requirements:\n"
+        "1. Vary scene lengths naturally (4-10s each):\n"
+        "   - Longer for complex ideas (e.g., breakthrough: 8-10s)\n"
+        "   - Shorter for transitions (e.g., impact: 4-6s)\n"
+        "2. Must cover these beats:\n"
+        "   - Origin (0.0 → [time]s): Set the stage\n"
+        "   - Key Challenge: Build tension\n"
+        "   - Breakthrough: Emotional peak\n"
+        "   - Impact: Quick payoff\n"
+        "3. Time Rules:\n"
+        "   - Start at 0.0\n"
+        "   - Total ≤60s\n"
+        "   - No scene <4s or >10s\n"
+        "4. Narration Tips:\n"
+        "   - Pause 0.3s before scene changes\n"
+        "   - Match visual transitions to vocal emphasis"
     )}
     content = pollinations_chat([sys, usr], model="openai", temperature=0.5, json_mode=True)
     try:
@@ -129,7 +150,7 @@ def upload_frame():
 def tts():
     data = request.get_json()
     text = data.get("text", "").strip()
-    voice = data.get("voice", "aura-asteria-en")
+    voice = data.get("voice", "aura-2-apollo-en")
     filename = f"narration_{uuid.uuid4().hex}.mp3"
     save_path = os.path.join(AUDIO_DIR, filename)
 
@@ -242,17 +263,38 @@ def assemble():
     if not images:
         return jsonify({"error": "No valid images found"}), 400
 
+
+
     # Calculate durations if not provided
-    if not scene_durations:
-        script = body.get("script", {}).get("scenes", [])
-        if script and len(script) == len(images):
-            scene_durations = [
-                (script[i+1]["start"] if i+1 < len(script) else script[i]["end"]) - scene["start"]
-                for i, scene in enumerate(script)
-            ]
-        else:
-            # Fallback: equal durations totaling 60 seconds
-            scene_durations = [60/len(images)] * len(images)
+    audio_duration = get_audio_duration(audio_path)  # Add this function (see below)
+    script = body.get("script", {})
+
+    if script.get("scenes") and len(images) == len(script["scenes"]):
+        # Use script timestamps clamped to audio duration
+        scene_durations = []
+        for i, scene in enumerate(script["scenes"]):
+            if i + 1 < len(script["scenes"]):
+                duration = min(script["scenes"][i+1]["start"] - scene["start"], 10)  # Max 10s per scene
+            else:
+                duration = min(audio_duration - scene["start"], 10)  # Don't exceed audio length
+            scene_durations.append(max(1, duration))  # Minimum 1s
+    else:
+        # Fallback: Distribute audio duration evenly
+        scene_durations = [max(1, min(10, audio_duration/len(images)))] * len(images)
+
+    # Add this helper function near the top of the file:
+    def get_audio_duration(path):
+        try:
+            result = subprocess.run([
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                path
+            ], capture_output=True, text=True)
+            return float(result.stdout.strip())
+        except:
+            return 60
+            
 
     # Create temp working directory
     temp_dir = tempfile.mkdtemp(prefix="video_assembly_")
